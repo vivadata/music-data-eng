@@ -1,7 +1,7 @@
 ## Setup
 
 # Clone the repo locally
-git clone https://github.com/olivier-gozlan/music_data_eng.git
+git clone https://github.com/vivadata/music-data-eng.git
 
 # Go inside the repo
 cd music_data_eng
@@ -14,5 +14,5 @@ pyenv local music-env
 
 ## Git commands
 git add .
-git commit -m "Updated Makefile" # Example
+git commit -m "Updated Makefile" # Example commit message
 git push origin main
