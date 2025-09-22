@@ -1,11 +1,11 @@
 from airflow import DAG
 from airflow.decorators import task
-from airflow.utils.dates import days_ago
+from datetime import datetime
 from google.cloud import bigquery
 import pandas as pd
 from datetime import timedelta
 
-CSV_FILE_PATH = "/opt/airflow/data/product.csv"
+CSV_FILE_PATH = "/opt/airflow/data/products.csv"
 PROJECT_ID = "music-data-eng"
 DATASET_ID = "music_dataset"
 TABLE_ID = "product"
@@ -21,11 +21,10 @@ default_args = {
 
 with DAG(
     dag_id="upload_product_csv_to_bq_taskflow",
-    default_args=default_args,
-    start_date=days_ago(1),
-    schedule_interval=None,
-    catchup=False,
-    tags=["example", "bigquery"],
+    start_date=datetime(2025, 1, 1),  # date de départ
+    schedule="*/2 * * * *",                # exécution quotidienne
+    catchup=False,                     # ne pas rattraper le passé
+    tags=["demo"],
 ) as dag:
 
     @task
