@@ -22,9 +22,11 @@ git push origin main
 
 ## Docker commands
 docker compose up 
-
 docker compose down
 docker system prune
+docker volume prune -f
 
 ## Airflow
-user airflow / password airflow 
+airflow / airflow 
+sudo chmod -R 777 dags/ # command to change permissions after changing the dags
+chmod -R 777 logs/ 
