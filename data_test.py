@@ -1,5 +1,4 @@
 import requests
-import pandas as pd
 
 url = "https://query.wikidata.org/sparql"
 query = """
@@ -11,20 +10,17 @@ SELECT ?item ?itemLabel ?deezer ?spotify ?youtube WHERE {
 }
 """
 
-headers = {"Accept": "application/sparql-results+json"}
+headers = {
+    "Accept": "text/csv",
+    "User-Agent": "music-data-exporter/0.1 (https://github.com/yourusername)"
+}
+
 response = requests.get(url, params={"query": query}, headers=headers)
-data = response.json()
 
-rows = []
-for entry in data["results"]["bindings"]:
-    rows.append({
-        "label": entry.get("itemLabel", {}).get("value"),
-        "wikidata": entry["item"]["value"],
-        "deezer": entry.get("deezer", {}).get("value"),
-        "spotify": entry.get("spotify", {}).get("value"),
-        "youtube": entry.get("youtube", {}).get("value"),
-    })
-
-df = pd.DataFrame(rows)
-df.to_csv("data/wikidata_deezer_spotify_youtube.csv", index=False, encoding="utf-8")
-print(f"{len(df)} résultats exportés dans wikidata_deezer_spotify_youtube.csv")
+if response.status_code == 200:
+    with open("data/wikidata_deezer_spotify_youtube.csv", "wb") as f:
+        f.write(response.content)
+    print("✅ Export terminé : wikidata_deezer_spotify_youtube.csv")
+else:
+    print(f"❌ Erreur {response.status_code}")
+    print(response.text[:500])

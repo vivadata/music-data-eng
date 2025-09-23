@@ -17,3 +17,7 @@ dist/
 .envrc
 keys/
 logs/
+
+
+# vscode
+.vscode/
