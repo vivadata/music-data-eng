@@ -17,3 +17,7 @@ dist/
 
 keys/
 logs/
+
+
+# vscode
+.vscode/

@@ -12,7 +12,19 @@ pyenv virtualenv 3.10.12 music-env
 # Make the virtual env local
 pyenv local music-env
 
+# Environment variables
+direnv allow  # approve .envrc content
+
 ## Git commands
 git add .
 git commit -m "Updated Makefile" # Example commit message
 git push origin main
+
+## Docker commands
+docker compose up 
+
+docker compose down
+docker system prune
+
+## Airflow
+user airflow / password airflow 
