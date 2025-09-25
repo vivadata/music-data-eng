@@ -1,0 +1,183 @@
+from airflow.decorators import dag, task, task_group
+from airflow.utils.task_group import TaskGroup
+from datetime import datetime, timedelta
+from google.cloud import bigquery
+import pandas as pd
+from loguru import logger
+import time
+import requests
+
+PROJECT_ID = "music-data-eng"
+DATASET_ID = "music_dataset"
+TABLE_ID_WIKIDATA = "wikidata_artists"
+
+TABLE_ID_DEEZER_DIM = "deezer_artists_dim_test"
+TABLE_ID_DEEZER_FACT = "deezer_artists_fact_test"
+
+CHUNK_SIZE = 500  
+
+default_args = {
+    "owner": "airflow",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
+}
+
+def chunk_list(values):
+    """Découpe une liste en morceaux de taille CHUNK_SIZE"""
+    # values = [v for v in values if v]  # enlève les NULL / None
+    # return [values[i:i+CHUNK_SIZE] for i in range(0, len(values), CHUNK_SIZE)]
+    return [values[0:50]]
+
+@dag(
+    dag_id="deezer_dim_fact_test",
+    start_date=datetime(2025, 1, 1),
+    schedule="@daily",
+    catchup=False,
+    default_args=default_args,
+    tags=["deezer", "artists"],
+)
+def process_deezer_artists_dag():
+
+    @task
+    def extract_deezer_ids():
+        client = bigquery.Client(project=PROJECT_ID)
+        df = client.query(
+            f"SELECT deezer_artist_id FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID_WIKIDATA}`"
+        ).to_dataframe()
+        ids = df["deezer_artist_id"].dropna().unique().tolist()
+        logger.info(f"{len(ids)} IDs Deezer trouvés dans Wikidata")
+        return chunk_list(ids)
+
+    @task(max_active_tis_per_dag=1)
+    def process_deezer(chunk: list):
+        """Traite une liste d'IDs Deezer avec rate limit"""
+        logger.info(f"Traitement Deezer : {len(chunk)} IDs")
+        rows = []
+        for i, id in enumerate(chunk, start=1):
+            url = f"https://api.deezer.com/artist/{id}"
+            response = requests.get(url)
+
+            if response.status_code != 200:
+                logger.error(f"HTTP {response.status_code} pour {url}")
+                continue
+
+            try:
+                data = response.json()
+            except ValueError:
+                logger.error(f"Réponse non JSON pour {url}: {response.text[:200]}")
+                continue
+
+            if "error" in data:
+                logger.warning(f"Erreur Deezer pour {id}: {data['error']}")
+                continue
+
+            rows.append({
+                "id": id,
+                "name": data.get("name"),
+                "link": data.get("link"),
+                "nb_fan": data.get("nb_fan"),
+            })
+
+            # Limiter à 50 requêtes / 5 secondes
+            if i % 50 == 0:
+                logger.info("Pause de 5s pour respecter le rate limit Deezer")
+                time.sleep(5)
+
+        return rows if rows else []
+    
+    @task
+    def create_dimension_and_fact_tables(artists_data: list):
+        if not artists_data:
+            return {"dimension": [], "fact": []}
+
+        current_date = datetime.now().date()
+        dimension_rows, fact_rows = [], []
+        
+        for artist in artists_data:
+            if not artist or not artist.get("id"):
+                continue
+            dimension_rows.append({
+                "deezer_artist_id": artist["id"],
+                "deezer_artist_name": artist.get("name"),
+                "deezer_artist_url": artist.get("link"),
+            })
+            fact_rows.append({
+                "deezer_artist_id": artist["id"],
+                "deezer_artist_total_followers": artist.get("nb_fan"),
+                "date": current_date,
+            })
+
+        return {"dimension": dimension_rows, "fact": fact_rows}
+
+    @task
+    def upload_dimension_table(dimension_data: list):
+        if not dimension_data:
+            return []
+        df = pd.DataFrame(dimension_data)
+        client = bigquery.Client(project=PROJECT_ID)
+        table_ref = client.dataset(DATASET_ID).table(TABLE_ID_DEEZER_DIM)
+        job_config = bigquery.LoadJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+        client.load_table_from_dataframe(df, table_ref, job_config=job_config).result()
+        logger.info(f"{len(df)} lignes insérées dans {TABLE_ID_DEEZER_DIM}")
+        return df["deezer_artist_id"].dropna().unique().tolist()
+
+    @task
+    def upload_fact_table(fact_data: list):
+        if not fact_data:
+            return
+        df = pd.DataFrame(fact_data)
+        client = bigquery.Client(project=PROJECT_ID)
+        table_ref = client.dataset(DATASET_ID).table(TABLE_ID_DEEZER_FACT)
+        try:
+            client.get_table(table_ref)
+        except Exception:
+            schema = [
+                bigquery.SchemaField("deezer_artist_id", "INTEGER", mode="REQUIRED"),
+                bigquery.SchemaField("deezer_artist_total_followers", "INTEGER"),
+                bigquery.SchemaField("date", "DATE", mode="REQUIRED"),
+            ]
+            table = bigquery.Table(table_ref, schema=schema)
+            table.time_partitioning = bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY)
+            client.create_table(table)
+        job_config = bigquery.LoadJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
+        client.load_table_from_dataframe(df, table_ref, job_config=job_config).result()
+        logger.info(f"{len(df)} lignes insérées dans {TABLE_ID_DEEZER_FACT}")
+
+    @task
+    def merge_fact_to_dimension():
+        client = bigquery.Client(project=PROJECT_ID)
+        query = f"""
+        MERGE `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID_DEEZER_DIM}` AS dim
+        USING (
+            SELECT deezer_artist_id, deezer_artist_total_followers
+            FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID_DEEZER_FACT}`
+            WHERE date = CURRENT_DATE()
+        ) AS fact
+        ON dim.deezer_artist_id = fact.deezer_artist_id
+        WHEN MATCHED THEN
+          UPDATE SET 
+            dim.deezer_artist_total_followers = fact.deezer_artist_total_followers
+        """
+        client.query(query).result()
+        logger.info("Merge terminé entre fact et dimension")
+
+    # ----------------
+    # TaskGroup Deezer
+    # ----------------
+    with TaskGroup("deezer_processing", tooltip="Pipeline Deezer") as deezer_group:
+        chunks = extract_deezer_ids()
+        artists = process_deezer.expand(chunk=chunks)
+        tables = create_dimension_and_fact_tables.expand(artists_data=artists)
+
+        dim_ids = upload_dimension_table.expand(dimension_data=tables["dimension"])
+        facts = upload_fact_table.expand(fact_data=tables["fact"])
+
+        [dim_ids, facts] >> merge_fact_to_dimension()
+
+    # Lancement du TaskGroup
+    deezer_group
+
+dag_instance = process_deezer_artists_dag()

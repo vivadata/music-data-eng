@@ -1,0 +1,178 @@
+from airflow.decorators import dag, task
+from datetime import datetime, timedelta
+from google.cloud import bigquery
+import pandas as pd
+from loguru import logger
+import os
+import time
+import threading
+import base64
+import requests
+
+PROJECT_ID = "music-data-eng"
+DATASET_ID = "music_dataset"
+TABLE_ID_WIKIDATA = "wikidata_artists"
+TABLE_ID_SPOTIFY = "spotify_artists_test"
+TABLE_ID_DEEZER = "deezer_artists_test"
+TABLE_ID_YOUTUBE = "youtube_artists_test"
+
+CHUNK_SIZE = 500  
+
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+
+# ---- Rate limiters for Spotify endpoints ----
+class RateLimiter:
+    def __init__(self, requests_per_second):
+        self.min_interval = 1.0 / requests_per_second
+        self._last_call = 0.0
+        self._lock = threading.Lock()
+    
+    def wait_if_needed(self):
+        with self._lock:
+            now = time.time()
+            elapsed = now - self._last_call
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self._last_call = time.time()
+
+# Separate rate limiters for different endpoints
+artists_limiter = RateLimiter(15)  # 15 req/s for artists
+tracks_limiter = RateLimiter(5)    # 5 req/s for top tracks
+
+def rate_limited_request(method, url, headers=None, params=None, limiter=None):
+    if limiter:
+        limiter.wait_if_needed()
+    return requests.request(method, url, headers=headers, params=params)
+
+default_args = {
+    "owner": "airflow",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
+}
+
+def chunk_list(values):
+    """Découpe une liste en morceaux de taille CHUNK_SIZE"""
+    # values = [v for v in values if v]  # enlève les NULL / None
+    # return [values[i:i+CHUNK_SIZE] for i in range(0, len(values), CHUNK_SIZE)]
+    return [values[0:49]]
+
+@dag(
+    dag_id="process_wikidata_artists_test",
+    start_date=datetime(2025, 1, 1),
+    schedule="@daily",
+    catchup=False,
+    default_args=default_args,
+    tags=["wikidata", "artists"],
+)
+def process_wikidata_artists_dag():
+
+    @task
+    def extract_spotify_ids():
+        client = bigquery.Client(project=PROJECT_ID)
+        df = client.query(
+            f"SELECT spotify_artist_id FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID_WIKIDATA}`"
+        ).to_dataframe()
+        ids = df["spotify_artist_id"].dropna().unique().tolist()
+        return chunk_list(ids)
+
+    @task
+    def extract_deezer_ids():
+        client = bigquery.Client(project=PROJECT_ID)
+        df = client.query(
+            f"SELECT deezer_artist_id FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID_WIKIDATA}`"
+        ).to_dataframe()
+        ids = df["deezer_artist_id"].dropna().unique().tolist()
+        return chunk_list(ids)
+
+    @task
+    def extract_youtube_ids():
+        client = bigquery.Client(project=PROJECT_ID)
+        df = client.query(
+            f"SELECT youtube_artist_id FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID_WIKIDATA}`"
+        ).to_dataframe()
+        ids = df["youtube_artist_id"].dropna().unique().tolist()
+        return chunk_list(ids)
+
+    # ----------------
+    # Step 2: Spotify token
+    # ----------------
+    def get_spotify_token():
+        url = "https://accounts.spotify.com/api/token"
+        auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
+        b64_auth = base64.b64encode(auth_str.encode()).decode()
+        headers = {"Authorization": f"Basic {b64_auth}"}
+        data = {"grant_type": "client_credentials"}
+        resp = requests.post(url, headers=headers, data=data)
+        resp.raise_for_status()
+        return resp.json()["access_token"]
+    
+    @task
+    def process_spotify(chunk: list):
+        logger.info(f"Traitement Spotify : {len(chunk)} IDs")
+        # traitement Spotify ici
+        return len(chunk)
+
+    @task(max_active_tis_per_dag=1)
+    def process_deezer(chunk: list):
+        logger.info(f"Traitement Deezer : {len(chunk)} IDs")
+        # traitement Deezer ici
+        """Traite une liste d'IDs Deezer avec rate limit"""
+        rows = []
+        for i, id in enumerate(chunk, start=1):
+            url = f"https://api.deezer.com/artist/{id}"
+            response = requests.get(url)
+
+            if response.status_code != 200:
+                logger.error(f"HTTP {response.status_code} pour {url}")
+                continue
+
+            try:
+                data = response.json()
+            except ValueError:
+                logger.error(f"Réponse non JSON pour {url}: {response.text[:200]}")
+                continue
+
+            if "error" in data:
+                logger.warning(f"Erreur Deezer pour {id}: {data['error']}")
+                continue
+
+            rows.append({
+                "id": id,
+                "name": data.get("name"),
+                "link": data.get("link"),
+                "nb_fan": data.get("nb_fan"),
+                "nb_album": data.get("nb_album"),
+            })
+
+            # Limiter à 50 requêtes / 5 secondes
+            if i % 50 == 0:
+                logger.info("Pause de 5s pour respecter le rate limit Deezer")
+                time.sleep(5)
+
+        if rows:
+            df = pd.DataFrame(rows)
+            client = bigquery.Client(project=PROJECT_ID)
+            table_ref = client.dataset(DATASET_ID).table(TABLE_ID_DEEZER)
+            job_config = bigquery.LoadJobConfig(
+                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+            )
+            job = client.load_table_from_dataframe(df, table_ref, job_config=job_config)
+            job.result()
+            logger.info(f"Loaded {len(df)} rows into {PROJECT_ID}.{DATASET_ID}.{TABLE_ID_DEEZER}")
+
+    @task
+    def process_youtube(chunk: list):
+        logger.info(f"Traitement YouTube : {len(chunk)} IDs")
+        # traitement YouTube ici
+        return len(chunk)
+
+    # Pipeline
+    process_spotify.expand(chunk=extract_spotify_ids())
+    process_deezer.expand(chunk=extract_deezer_ids())
+    process_youtube.expand(chunk=extract_youtube_ids())
+
+dag_instance = process_wikidata_artists_dag()

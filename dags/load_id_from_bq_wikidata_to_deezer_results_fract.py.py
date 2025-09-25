@@ -1,17 +1,15 @@
 from airflow.decorators import dag, task
-from datetime import datetime
+from datetime import datetime, timedelta
 from google.cloud import bigquery
 import pandas as pd
-from datetime import timedelta
 import requests
 from loguru import logger
-import time
 
 
 PROJECT_ID = "music-data-eng"
 DATASET_ID = "music_dataset"
 TABLE_ID_WIKIDATA = "wikidata_artists"
-OUTPUT_TABLE = "deezer_results"
+OUTPUT_TABLE = "deezer_artists"
 
 CHUNK_SIZE = 500  
 
@@ -20,7 +18,7 @@ default_args = {
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,
-    "retries": 1,
+    "retries": 0,
     "retry_delay": timedelta(minutes=5),
 }
 
@@ -30,14 +28,14 @@ def chunk_list(values):
     return [values[i:i+CHUNK_SIZE] for i in range(0, len(values), CHUNK_SIZE)]
 
 @dag(
-    dag_id="wikidata_to_deezer_processing",
+    dag_id="deezer_pipeline",
     start_date=datetime(2025, 1, 1),
     schedule="@daily",
     catchup=False,
     default_args=default_args,
-    tags=["wikidata", "artists"],
+    tags=["deezer", "artists"],
 )
-def process_wikidata_artists_dag():
+def process_deezer_artists_dag():
 
     @task
     def extract_deezer_ids():
@@ -64,10 +62,10 @@ def process_wikidata_artists_dag():
                 continue
 
             results.append({
-                "id": str(artist_id),
-                "name": data.get("name"),
-                "link": data.get("link"),
-                "nb_fan": data.get("nb_fan"),
+                "deezer_artist_id": str(artist_id),
+                "deezer_artist_name": data.get("name"),
+                "deezer_artist_url": data.get("link"),
+                "deezer_artist_total_followers": data.get("nb_fan"),
             })
 
             # respect du quota Deezer (50 req / 5s)
@@ -90,6 +88,13 @@ def process_wikidata_artists_dag():
         table_id = f"{PROJECT_ID}.{DATASET_ID}.{OUTPUT_TABLE}"
 
         job_config = bigquery.LoadJobConfig(
+            schema=[
+                bigquery.SchemaField("deezer_artist_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("deezer_artist_name", "STRING"),
+                bigquery.SchemaField("deezer_artist_url", "STRING"),
+                bigquery.SchemaField("deezer_artist_total_followers", "INTEGER"),
+                bigquery.SchemaField("ingestion_date", "DATE"),
+            ],
             write_disposition="WRITE_APPEND",
             time_partitioning=bigquery.TimePartitioning(
                 type_=bigquery.TimePartitioningType.DAY,
@@ -105,4 +110,4 @@ def process_wikidata_artists_dag():
     chunks=extract_deezer_ids()
     load_results_to_bq.expand(results=process_deezer.expand(chunk=chunks))
    
-dag_instance = process_wikidata_artists_dag()
+dag_instance = process_deezer_artists_dag()
