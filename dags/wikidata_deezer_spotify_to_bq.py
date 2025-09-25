@@ -24,7 +24,7 @@ default_args = {
 with DAG(
     dag_id="upload_wikidata_with_deezer_to_bq_taskflow",
     start_date=datetime(2025, 1, 1),  # date de départ
-    schedule="*/2 * * * *",                # exécution quotidienne
+    schedule="0 12 * * *",                # exécution quotidienne
     catchup=False,                     # ne pas rattraper le passé
     max_active_tasks=1,
     tags=["demo"],
