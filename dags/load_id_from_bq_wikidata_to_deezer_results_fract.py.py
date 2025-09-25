@@ -26,9 +26,8 @@ default_args = {
 
 def chunk_list(values):
     """Découpe une liste en morceaux de taille CHUNK_SIZE"""
-    #values = [v for v in values if v]  # enlève les NULL / None
-    #return [values[i:i+CHUNK_SIZE] for i in range(0, len(values), CHUNK_SIZE)]
-    return [values[0:50]]
+    values = [v for v in values if v]  # enlève les NULL / None
+    return [values[i:i+CHUNK_SIZE] for i in range(0, len(values), CHUNK_SIZE)]
 
 @dag(
     dag_id="wikidata_to_deezer_processing",
@@ -51,7 +50,7 @@ def process_wikidata_artists_dag():
 
   
    
-    @task
+    @task(max_active_tis_per_dag=1)
     def process_deezer(chunk: list):
         logger.info(f"Traitement Deezer : {len(chunk)} IDs")
         results = []
