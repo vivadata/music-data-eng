@@ -82,6 +82,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${AIRFLOW_PROJ_DIR:-.}/keys:/opt/airflow/keys
     - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+    - ../dbt:/opt/airflow/dbt
   depends_on:
     &airflow-common-depends-on
     redis:
