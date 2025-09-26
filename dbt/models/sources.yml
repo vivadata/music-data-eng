@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: music_dataset
+    database: music-data-eng
+    schema: music_dataset
+    tables:
+      - name: deezer_results
+      - name: spotify_artists

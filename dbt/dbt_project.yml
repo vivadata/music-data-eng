@@ -1,0 +1,6 @@
+name: 'music_analytics'
+version: '1.0'
+profile: 'music_data_eng'
+model-paths: ["models"]
+target-path: "target"
+clean-targets: ["target"]

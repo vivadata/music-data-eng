@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: artists_union
+    description: "Vue combinant les artistes de Deezer et Spotify avec toutes les métriques disponibles."
+    columns:
+      - name: artist_name
+        description: "Nom de l'artiste (fusion Deezer/Spotify)"
+        tests:
+          - not_null
+          - unique
+
+      - name: deezer_artist_id
+        description: "Identifiant de l'artiste sur Deezer"
+        tests:
+          - not_null
+
+      - name: deezer_artist_url
+        description: "URL de l'artiste sur Deezer"
+
+      - name: deezer_nb_fan
+        description: "Nombre de fans de l'artiste sur Deezer"
+
+      - name: deezer_ingestion_date
+        description: "Date d'ingestion des données Deezer"
+
+      - name: spotify_artist_id
+        description: "Identifiant de l'artiste sur Spotify"
+        tests:
+          - not_null
+
+      - name: spotify_artist_genres
+        description: "Liste des genres Spotify pour l'artiste"
+
+      - name: spotify_artist_url
+        description: "URL de l'artiste sur Spotify"
+
+      - name: spotify_artist_total_followers
+        description: "Nombre total de followers de l'artiste sur Spotify"
+
+      - name: spotify_artist_popularity
+        description: "Score de popularité Spotify"
+
+      - name: spotify_ingestion_date
+        description: "Date d'ingestion des données Spotify"
