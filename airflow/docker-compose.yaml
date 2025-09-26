@@ -295,6 +295,21 @@ services:
   # or by explicitly targeted on the command line e.g. docker-compose up flower.
   # See: https://docs.docker.com/compose/profiles/
   
+  api:
+    build:
+      context: ./music_app/backend
+      dockerfile: Dockerfile-api
+    ports:
+      - "8000:8000"
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /api/keys/gcp_sa_key.json
+      PROJECT_ID: music-data-eng
+      DATASET_ID: music_dataset
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    volumes:
+      - ./keys/gcp_sa_key.json:/api/keys/gcp_sa_key.json:ro  # mount JSON key read-only
+      - ./music_app/backend:/api
+    command: uvicorn fast:music_data_api --host 0.0.0.0 --port 8000 --reload
 
 volumes:
   postgres-db-volume:

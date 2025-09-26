@@ -5,26 +5,25 @@ import pandas as pd
 import requests
 from loguru import logger
 
-
 PROJECT_ID = "music-data-eng"
 DATASET_ID = "music_dataset"
 TABLE_ID_WIKIDATA = "wikidata_artists"
 OUTPUT_TABLE = "deezer_artists"
-
 CHUNK_SIZE = 500  
 
+# ---- Arguments par défaut pour le DAG ----
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,
-    "retries": 0,
+    "retries": 2,
     "retry_delay": timedelta(minutes=5),
 }
 
 def chunk_list(values):
-    """Découpe une liste en morceaux de taille CHUNK_SIZE"""
-    values = [v for v in values if v]  # enlève les NULL / None
+    """Découpe une liste en sous-listes de taille CHUNK_SIZE"""
+    values = [v for v in values if v]  # suppression des NULL / None
     return [values[i:i+CHUNK_SIZE] for i in range(0, len(values), CHUNK_SIZE)]
 
 @dag(
@@ -35,30 +34,33 @@ def chunk_list(values):
     default_args=default_args,
     tags=["deezer", "artists"],
 )
-def process_deezer_artists_dag():
+def fetch_deezer_artists_data_dag():
 
     @task
     def extract_deezer_ids():
+        """Extrait les identifiants Deezer depuis la table Wikidata dans BigQuery"""
         client = bigquery.Client(project=PROJECT_ID)
         df = client.query(
             f"SELECT deezer_artist_id FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID_WIKIDATA}`"
         ).to_dataframe()
         ids = df["deezer_artist_id"].dropna().unique().tolist()
+        logger.info(f"{len(ids)} identifiants Deezer extraits depuis Wikidata")
         return chunk_list(ids)
-
-  
    
     @task(max_active_tis_per_dag=1)
-    def process_deezer(chunk: list):
-        logger.info(f"Traitement Deezer : {len(chunk)} IDs")
+    def fetch_deezer_data(chunk: list):
+        """Appelle l'API Deezer pour enrichir les informations artistes d'un chunk d'identifiants"""
+        logger.info(f"Traitement d'un chunk Deezer : {len(chunk)} identifiants à interroger")
         results = []
         for i, artist_id in enumerate(chunk, start=1):
             url = f"https://api.deezer.com/artist/{artist_id}"
             resp = requests.get(url)
             if resp.status_code != 200:
+                logger.warning(f"Échec de la requête pour l'identifiant Deezer {artist_id} (code {resp.status_code})")
                 continue
             data = resp.json()
             if "error" in data:
+                logger.warning(f"Erreur Deezer renvoyée pour l'ID {artist_id}")
                 continue
 
             results.append({
@@ -68,17 +70,20 @@ def process_deezer_artists_dag():
                 "deezer_artist_total_followers": data.get("nb_fan"),
             })
 
-            # respect du quota Deezer (50 req / 5s)
+            # Respect du quota Deezer (50 requêtes par 5 secondes)
             if i % 50 == 0:
                 import time
+                logger.info("Quota atteint : pause de 5 secondes pour respecter les limites Deezer")
                 time.sleep(5)
 
+        logger.info(f"Chunk Deezer traité : {len(results)} résultats valides")
         return results
 
     @task
-    def load_results_to_bq(results: list):
-        """Charge les résultats dans BigQuery (partitionné par ingestion_date)"""
+    def write_to_bigquery(results: list):
+        """Charge les résultats Deezer dans BigQuery (partitionnés par date d'ingestion)"""
         if not results:
+            logger.warning("Aucun résultat à charger dans BigQuery (chunk vide ou erreurs).")
             return
 
         df = pd.DataFrame(results)
@@ -104,10 +109,10 @@ def process_deezer_artists_dag():
 
         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
         job.result()
-        logger.info(f"{len(df)} lignes chargées dans {table_id}")
+        logger.info(f"{len(df)} lignes chargées avec succès dans {table_id}")
   
-    # Pipeline
-    chunks=extract_deezer_ids()
-    load_results_to_bq.expand(results=process_deezer.expand(chunk=chunks))
+    # ---- Orchestration du DAG ----
+    chunks = extract_deezer_ids()
+    write_to_bigquery.expand(results=fetch_deezer_data.expand(chunk=chunks))
    
-dag_instance = process_deezer_artists_dag()
+dag_instance = fetch_deezer_artists_data_dag()

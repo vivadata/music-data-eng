@@ -1,11 +1,10 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
 from google.cloud import bigquery
 from openai import OpenAI
 import os
-import loguru
 import json
 import re
+from pydantic import BaseModel
 
 music_data_api = FastAPI()
 
@@ -24,8 +23,26 @@ class QueryRequest(BaseModel):
 
 # ----- SQL cleaning helpers -----
 def clean_llm_sql(sql: str) -> str:
-    """Strip markdown and whitespace"""
+    """Strip markdown, whitespace and fix unqualified table names."""
     sql = sql.replace("```sql", "").replace("```", "").strip()
+
+    # Remplacer toute référence non qualifiée à artists_union
+    # Exemple: FROM artists_union → FROM `music-data-eng.music_dataset.artists_union`
+    sql = re.sub(
+        r"\bFROM\s+artists_union\b",
+        "FROM `music-data-eng.music_dataset.artists_union`",
+        sql,
+        flags=re.IGNORECASE,
+    )
+
+    # Pareil pour les JOIN éventuels
+    sql = re.sub(
+        r"\bJOIN\s+artists_union\b",
+        "JOIN `music-data-eng.music_dataset.artists_union`",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    
     return sql
 
 def make_genre_case_insensitive(sql: str) -> str:
@@ -48,20 +65,7 @@ def make_genre_case_insensitive(sql: str) -> str:
     
     return re.sub(pattern, repl, sql, flags=re.IGNORECASE)
 
-# Example data model
-class Artist(BaseModel):
-    id: str
-    name: str
-    genres: list[str]
-    popularity: int
-
-# In-memory mock data (replace later with BigQuery / DB calls)
-artists_db = [
-    {"id": "1", "name": "Artist A", "genres": ["pop"], "popularity": 80},
-    {"id": "2", "name": "Artist B", "genres": ["rock"], "popularity": 70},
-    {"id": "3", "name": "Artist C", "genres": ["jazz"], "popularity": 65},
-]
-
+# ----- Endpoints -----
 @music_data_api.get("/")
 def read_root():
     return {"message": "Welcome to our music data api"}
@@ -74,7 +78,7 @@ def ask_bigquery(req: QueryRequest):
     prompt = f"""
     You are a data assistant. The dataset is `{PROJECT_ID}.{DATASET_ID}`.
     Table:
-    - artists_union(
+    - `{PROJECT_ID}.{DATASET_ID}.artists_union` (
         spotify_artist_id STRING,
         spotify_artist_name STRING,
         spotify_artist_genres ARRAY<STRING>,
@@ -84,14 +88,14 @@ def ask_bigquery(req: QueryRequest):
         deezer_name STRING,
         deezer_nb_fan INT64,
         ingestion_date TIMESTAMP
-        )
+    )
 
     Important rules:
-    - `spotify_artist_genres` is an ARRAY<STRING>, not a string. Use UNNEST() directly, do NOT use SPLIT().
-    - Always make genre filters case-insensitive using:
-        EXISTS (SELECT 1 FROM UNNEST(spotify_artist_genres) g WHERE LOWER(g) = LOWER('electro'))
-    - Return only valid BigQuery SQL, no markdown, no explanation.
-        
+    - Always reference the table with full path: `{PROJECT_ID}.{DATASET_ID}.artists_union`
+    - Never use just "artists_union".
+    - `spotify_artist_genres` is an ARRAY<STRING>, use UNNEST() directly, do NOT use SPLIT().
+    - Genre filters must be case-insensitive with LOWER().
+    - Return only valid BigQuery SQL, no markdown, no explanation.    
     Question: {req.question}
     """
 
@@ -118,28 +122,3 @@ def ask_bigquery(req: QueryRequest):
         "sql": sql_query,
         "results": result_preview
     }
-
-@music_data_api.get("/artists")
-def get_artists():
-    return {"artists": artists_db}
-
-@music_data_api.get("/artists/{artist_id}")
-def get_artist(artist_id: str):
-    artist = next((a for a in artists_db if a["id"] == artist_id), None)
-    if not artist:
-        return {"error": "Artist not found"}
-    return artist
-
-@music_data_api.get("/stats/top-genres")
-def top_genres():
-    from collections import Counter
-    all_genres = [g for a in artists_db for g in a["genres"]]
-    return {"genres": Counter(all_genres)}
-
-@music_data_api.get("/predict")
-def predict():
-    pass
-
-@music_data_api.get("/predict")
-def predict_post():
-    pass

@@ -1,0 +1,11 @@
+FROM python:3.10.12-slim
+
+WORKDIR /api
+
+# Copier le fichier requirements.txt
+COPY requirements.txt requirements.txt
+
+# Installer les dépendances supplémentaires
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . api

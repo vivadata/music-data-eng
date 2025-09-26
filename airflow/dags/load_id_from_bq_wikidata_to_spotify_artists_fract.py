@@ -9,26 +9,25 @@ import os
 import threading
 import base64
 
-
 PROJECT_ID = "music-data-eng"
 DATASET_ID = "music_dataset"
 TABLE_ID_WIKIDATA = "wikidata_artists"
 OUTPUT_TABLE = "spotify_artists"
-
+CHUNK_SIZE = 50
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
-CHUNK_SIZE = 50  
-
-
-# ---- Rate limiters global pour endpoints Spotify ----
+# ---- Limiteur de débit global pour l’API Spotify ----
 class RateLimiter:
+    """Classe utilitaire pour limiter la fréquence des appels API."""
+
     def __init__(self, requests_per_second):
         self.min_interval = 1.0 / requests_per_second
         self._last_call = 0.0
         self._lock = threading.Lock()
     
     def wait_if_needed(self):
+        """Attend si nécessaire afin de respecter le débit maximal autorisé."""
         with self._lock:
             now = time.time()
             elapsed = now - self._last_call
@@ -36,16 +35,18 @@ class RateLimiter:
                 time.sleep(self.min_interval - elapsed)
             self._last_call = time.time()
 
-artists_limiter = RateLimiter(15)  # 15 req/s pour le endpoint artistes
+artists_limiter = RateLimiter(15)  # 15 requêtes/s pour l’endpoint Spotify /artists
 
 def rate_limited_request(method, url, headers=None, params=None, limiter=None):
+    """Exécute une requête HTTP en respectant un éventuel limiteur de débit."""
     if limiter:
         limiter.wait_if_needed()
     return requests.request(method, url, headers=headers, params=params)
 
-# Spotify token
+# ---- Récupération du token Spotify ----
 def get_spotify_token():
-    logger.info(f"Récupération du token Spotify")
+    """Récupère un token d'authentification Spotify en utilisant Client Credentials Flow."""
+    logger.info("Récupération du token Spotify")
     url = "https://accounts.spotify.com/api/token"
     auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
     b64_auth = base64.b64encode(auth_str.encode()).decode()        
@@ -53,10 +54,10 @@ def get_spotify_token():
     data = {"grant_type": "client_credentials"}
     resp = requests.post(url, headers=headers, data=data)
     resp.raise_for_status()
-    logger.info(f"Token Spotify récupéré")
+    logger.info(f"Token Spotify récupéré avec succès")
     return resp.json()["access_token"]
 
-# ---- DAG Default Args ----
+# ---- Paramètres par défaut du DAG ----
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
@@ -67,8 +68,8 @@ default_args = {
 }
 
 def chunk_list(values):
-    """Découpe une liste en morceaux de taille CHUNK_SIZE"""
-    values = [v for v in values if v]  # enlève les NULL / None
+    """Découpe une liste en morceaux de taille fixe (CHUNK_SIZE)."""
+    values = [v for v in values if v]  # enlève les valeurs NULL / None
     return [values[i:i+CHUNK_SIZE] for i in range(0, len(values), CHUNK_SIZE)]
 
 @dag(
@@ -79,22 +80,24 @@ def chunk_list(values):
     default_args=default_args,
     tags=["spotify", "artists"],
 )
-def process_spotify_artists_dag():
+def fetch_spotify_artists_data_dag():
 
     @task
     def extract_spotify_ids():
+        """Extrait les identifiants Spotify depuis la table Wikidata dans BigQuery."""
         client = bigquery.Client(project=PROJECT_ID)
         df = client.query(
             f"SELECT spotify_artist_id FROM `{PROJECT_ID}.{DATASET_ID}.{TABLE_ID_WIKIDATA}`"
         ).to_dataframe()
         ids = df["spotify_artist_id"].dropna().unique().tolist()
-        logger.info(f"{len(ids)} IDs Spotify trouvés dans Wikidata")
+        logger.info(f"{len(ids)} identifiants Spotify trouvés dans Wikidata")
         return chunk_list(ids)
 
     @task(max_active_tis_per_dag=5, retries=3, retry_delay=timedelta(minutes=2))
-    def process_spotify(chunk: list):
+    def fetch_spotify_data(chunk: list):
+        """Récupère les métadonnées Spotify pour un chunk d'artistes."""
         try:
-            logger.info(f"Traitement de chunk Spotify : {len(chunk)} IDs")
+            logger.info(f"Traitement d'un chunk Spotify : {len(chunk)} identifiants")
             token = get_spotify_token()
             url = "https://api.spotify.com/v1/artists"
             headers = {"Authorization": f"Bearer {token}"}
@@ -103,9 +106,10 @@ def process_spotify_artists_dag():
             resp = rate_limited_request("GET", url, headers=headers, params=params, limiter=artists_limiter)
             while resp.status_code == 429:
                 wait_time = int(resp.headers.get("Retry-After", "1"))
-                logger.warning(f"Rate limit Spotify atteinte. Attente de {wait_time}s")
+                logger.warning(f"Limite de débit Spotify atteinte. Attente de {wait_time} secondes...")
                 time.sleep(wait_time)
                 resp = rate_limited_request("GET", url, headers=headers, params=params, limiter=artists_limiter)
+
             resp.raise_for_status()
             artists = resp.json().get("artists", [])  
 
@@ -125,27 +129,27 @@ def process_spotify_artists_dag():
             return results
         
         except Exception as e:
-            logger.error(f"Le chunk a échoué: {e}")
+            logger.error(f"Échec du traitement du chunk : {e}")
             return None 
     
     @task
     def flatten_results(results_list: list[list[dict]]) -> list[dict]:
-        """Flatten la liste de listes en une liste unique"""
+        """Aplati la liste de listes de résultats en une seule liste."""
         valid_results = [item for sublist in results_list for item in sublist]
-        logger.info(f"Résultats flattened en {len(valid_results)} records")
+        logger.info(f"Résultats aplatis en {len(valid_results)} enregistrements")
         return valid_results
     
     @task
-    def load_results_to_bq(results: list[dict]):
-        """Charge les résultats dans BigQuery"""
+    def write_to_bigquery(results: list[dict]):
+        """Charge les résultats finaux dans BigQuery"""
         if not results:
-            logger.warning("Pas de résultats valides à charger (tous les chunks ont échoué).")
+            logger.warning("Aucun résultat valide à charger (tous les chunks ont échoué).")
             return
         
         df = pd.DataFrame(results)
         df["ingestion_date"] = datetime.now().date()
 
-        # Assurance que genres est une liste
+        # Vérification : genres doit toujours être une liste
         df["spotify_artist_genres"] = df["spotify_artist_genres"].apply(lambda x: x if isinstance(x, list) else [])
 
         client = bigquery.Client(project=PROJECT_ID)
@@ -171,8 +175,8 @@ def process_spotify_artists_dag():
 
     # ---- DAG orchestration ----
     chunks = extract_spotify_ids()
-    results_list = process_spotify.expand(chunk=chunks)
+    results_list = fetch_spotify_data.expand(chunk=chunks)
     flat_results = flatten_results(results_list)
-    load_results_to_bq(flat_results)
+    write_to_bigquery(flat_results)
 
-dag_instance = process_spotify_artists_dag()
+dag_instance = fetch_spotify_artists_data_dag()
