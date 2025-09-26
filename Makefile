@@ -30,3 +30,7 @@ docker volume prune -f
 airflow / airflow 
 sudo chmod -R 777 dags/ # command to change permissions after changing the dags
 chmod -R 777 logs/ 
+
+## Fast API
+cd music_app
+uvicorn backend.fast:music_data_api --host 0.0.0.0 --port 8000 --reload

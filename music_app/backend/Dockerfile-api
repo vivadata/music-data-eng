@@ -1,0 +1,11 @@
+FROM python:3.10.12-slim
+
+WORKDIR /api
+
+#COPY src src
+COPY requirements.txt requirements.txt
+RUN pip install .
+
+COPY backend api
+
+CMD uvicorn api.fast:music_data_api --host 0.0.0.0 --port ${PORT}
