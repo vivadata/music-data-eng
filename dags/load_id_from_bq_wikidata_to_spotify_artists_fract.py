@@ -21,7 +21,7 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 CHUNK_SIZE = 50  
 
 
-# ---- Rate limiters pour endpoints Spotify ----
+# ---- Rate limiters global pour endpoints Spotify ----
 class RateLimiter:
     def __init__(self, requests_per_second):
         self.min_interval = 1.0 / requests_per_second
@@ -36,7 +36,7 @@ class RateLimiter:
                 time.sleep(self.min_interval - elapsed)
             self._last_call = time.time()
 
-artists_limiter = RateLimiter(15)  # 15 req/s pour les artistes
+artists_limiter = RateLimiter(15)  # 15 req/s pour le endpoint artistes
 
 def rate_limited_request(method, url, headers=None, params=None, limiter=None):
     if limiter:
@@ -56,12 +56,13 @@ def get_spotify_token():
     logger.info(f"Token Spotify récupéré")
     return resp.json()["access_token"]
 
+# ---- DAG Default Args ----
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,
-    "retries": 0,
+    "retries": 2,
     "retry_delay": timedelta(minutes=5),
 }
 
@@ -90,51 +91,62 @@ def process_spotify_artists_dag():
         logger.info(f"{len(ids)} IDs Spotify trouvés dans Wikidata")
         return chunk_list(ids)
 
-    @task(max_active_tis_per_dag=1)
+    @task(max_active_tis_per_dag=5, retries=3, retry_delay=timedelta(minutes=2))
     def process_spotify(chunk: list):
-        logger.info(f"Traitement Spotify : {len(chunk)} IDs")
-        
-        token = get_spotify_token()
-        url = "https://api.spotify.com/v1/artists"
-        headers = {"Authorization": f"Bearer {token}"}
-        params = {"ids": ",".join(chunk)}
-        resp = rate_limited_request("GET", url, headers=headers, params=params, limiter=artists_limiter)
-        while resp.status_code == 429:
-            wait_time = int(resp.headers.get("Retry-After", "1"))
-            time.sleep(wait_time)
+        try:
+            logger.info(f"Traitement de chunk Spotify : {len(chunk)} IDs")
+            token = get_spotify_token()
+            url = "https://api.spotify.com/v1/artists"
+            headers = {"Authorization": f"Bearer {token}"}
+            params = {"ids": ",".join(chunk)}
+
             resp = rate_limited_request("GET", url, headers=headers, params=params, limiter=artists_limiter)
-            
-        resp.raise_for_status()
-        artists = resp.json().get("artists", [])
-            
-        results = []
-        for artist in artists:
-            if not artist:
-                continue    
-            results.append({
-                "spotify_artist_id": artist["id"],
-                "spotify_artist_name": artist.get("name"),
-                "spotify_artist_genres": artist.get("genres", []),
-                "spotify_artist_url": artist.get("external_urls", {}).get("spotify"),
-                "spotify_artist_popularity": artist.get("popularity"),
-                "spotify_artist_total_followers": artist.get("followers", {}).get("total") if artist.get("followers") else None,
-            })
+            while resp.status_code == 429:
+                wait_time = int(resp.headers.get("Retry-After", "1"))
+                logger.warning(f"Rate limit Spotify atteinte. Attente de {wait_time}s")
+                time.sleep(wait_time)
+                resp = rate_limited_request("GET", url, headers=headers, params=params, limiter=artists_limiter)
+            resp.raise_for_status()
+            artists = resp.json().get("artists", [])  
 
-        return results
+            results = []
+            for artist in artists:
+                if not artist:
+                    continue    
+                results.append({
+                    "spotify_artist_id": artist["id"],
+                    "spotify_artist_name": artist.get("name"),
+                    "spotify_artist_genres": artist.get("genres", []),
+                    "spotify_artist_url": artist.get("external_urls", {}).get("spotify"),
+                    "spotify_artist_popularity": artist.get("popularity"),
+                    "spotify_artist_total_followers": artist.get("followers", {}).get("total") if artist.get("followers") else None,
+                })
+
+            return results
+        
+        except Exception as e:
+            logger.error(f"Le chunk a échoué: {e}")
+            return None 
     
-
     @task
-    def load_results_to_bq(results: list):
-        """Charge les résultats dans BigQuery (partitionné par ingestion_date)"""
+    def flatten_results(results_list: list[list[dict]]) -> list[dict]:
+        """Flatten la liste de listes en une liste unique"""
+        valid_results = [item for sublist in results_list for item in sublist]
+        logger.info(f"Résultats flattened en {len(valid_results)} records")
+        return valid_results
+    
+    @task
+    def load_results_to_bq(results: list[dict]):
+        """Charge les résultats dans BigQuery"""
         if not results:
+            logger.warning("Pas de résultats valides à charger (tous les chunks ont échoué).")
             return
-
+        
         df = pd.DataFrame(results)
         df["ingestion_date"] = datetime.now().date()
-        # Ensure genres is list of strings, not a string
-        df["spotify_artist_genres"] = df["spotify_artist_genres"].apply(
-        lambda x: x if isinstance(x, list) else []
-        )
+
+        # Assurance que genres est une liste
+        df["spotify_artist_genres"] = df["spotify_artist_genres"].apply(lambda x: x if isinstance(x, list) else [])
 
         client = bigquery.Client(project=PROJECT_ID)
         table_id = f"{PROJECT_ID}.{DATASET_ID}.{OUTPUT_TABLE}"
@@ -143,25 +155,24 @@ def process_spotify_artists_dag():
             schema=[
                 bigquery.SchemaField("spotify_artist_id", "STRING", mode="REQUIRED"),
                 bigquery.SchemaField("spotify_artist_name", "STRING"),
-                bigquery.SchemaField("spotify_artist_genres", "STRING", mode="REPEATED"), 
+                bigquery.SchemaField("spotify_artist_genres", "STRING", mode="REPEATED"),
                 bigquery.SchemaField("spotify_artist_url", "STRING"),
                 bigquery.SchemaField("spotify_artist_popularity", "INTEGER"),
                 bigquery.SchemaField("spotify_artist_total_followers", "INTEGER"),
                 bigquery.SchemaField("ingestion_date", "DATE"),
             ],
             write_disposition="WRITE_APPEND",
-            time_partitioning=bigquery.TimePartitioning(
-                type_=bigquery.TimePartitioningType.DAY,
-                field="ingestion_date"
-            ),
+            time_partitioning=bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY, field="ingestion_date")
         )
 
         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
         job.result()
-        logger.info(f"{len(df)} lignes chargées dans {table_id}")
-  
-    # Pipeline
-    chunks=extract_spotify_ids()
-    load_results_to_bq.expand(results=process_spotify.expand(chunk=chunks))
-   
+        logger.info(f"{len(df)} lignes chargées dans la table {table_id}")
+
+    # ---- DAG orchestration ----
+    chunks = extract_spotify_ids()
+    results_list = process_spotify.expand(chunk=chunks)
+    flat_results = flatten_results(results_list)
+    load_results_to_bq(flat_results)
+
 dag_instance = process_spotify_artists_dag()
