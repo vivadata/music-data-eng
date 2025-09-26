@@ -1,0 +1,23 @@
+# data
+data/
+
+# Python
+__pycache__/
+*.ipynb_checkpoints
+
+# Virtual Environment
+.python-version
+
+# Python Package
+build/
+dist/
+*.egg-info/
+
+.env
+.envrc
+keys/
+logs/
+
+
+# vscode
+.vscode/

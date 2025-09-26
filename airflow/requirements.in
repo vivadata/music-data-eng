@@ -1,0 +1,9 @@
+datetime
+pandas
+google-cloud-bigquery
+loguru
+apache-airflow-providers-google
+apache-airflow-providers-postgres
+google-cloud-storage
+requests
+plotly-express
