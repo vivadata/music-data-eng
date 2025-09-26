@@ -1,0 +1,12 @@
+music_data_eng:
+  target: prod
+  outputs:
+    prod:
+      type: bigquery
+      method: service-account
+      project: music-data-eng
+      dataset: music_dataset       # dataset final
+      location: EU                # localisation du dataset
+      keyfile: keys/gcp_sa_key.json
+      threads: 4
+      timeout_seconds: 300

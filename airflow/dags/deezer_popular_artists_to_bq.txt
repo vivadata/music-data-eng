@@ -1,0 +1,58 @@
+from airflow import DAG
+from airflow.decorators import task
+from datetime import datetime
+from google.cloud import bigquery
+import pandas as pd
+from datetime import timedelta
+import requests
+from loguru import logger
+
+PROJECT_ID = "music-data-eng"
+DATASET_ID = "music_dataset"
+TABLE_ID = "deezer_popular_artists"
+
+default_args = {
+    "owner": "airflow",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
+}
+
+with DAG(
+    dag_id="upload_deezer_popular_artists_to_bq_taskflow",
+    start_date=datetime(2025, 1, 1),  # date de départ
+    schedule="0 12 * * *",                # exécution quotidienne
+    catchup=False,                     # ne pas rattraper le passé
+    tags=["demo"],
+) as dag:
+
+    @task
+    def upload_chart_to_bq():
+        
+        url="https://api.deezer.com/chart/0/artists"
+        
+        response = requests.get(url)
+        data = response.json()
+        artists = data.get('data',[])
+        df=pd.DataFrame(artists)
+        logger.info(f"Dataframe columns: {df.columns}")
+        # Créer le client BigQuery
+        client = bigquery.Client(project=PROJECT_ID)
+        
+        # Référence de la table
+        table_ref = client.dataset(DATASET_ID).table(TABLE_ID)
+        
+        # Configurer l'import
+        job_config = bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        )
+        
+        # Charger le DataFrame dans BigQuery
+        job = client.load_table_from_dataframe(df, table_ref, job_config=job_config)
+        job.result()  # Attendre que le job se termine
+        logger.info(f"Loaded {len(df)} rows into {PROJECT_ID}.{DATASET_ID}.{TABLE_ID}")
+        print(f"{len(df)} lignes chargées dans {PROJECT_ID}.{DATASET_ID}.{TABLE_ID}")
+
+    upload_chart_to_bq()

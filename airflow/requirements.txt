@@ -4,3 +4,4 @@ loguru
 apache-airflow-providers-google
 apache-airflow-providers-postgres
 google-cloud-storage
+dbt-bigquery
