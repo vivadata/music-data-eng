@@ -17,17 +17,20 @@ OPEN_API_KEY = os.getenv("OPENAI_API_KEY")
 bq_client = bigquery.Client(project=PROJECT_ID)
 openai_client = OpenAI()
 
-# ----- Request schema -----
+# ----- Schéma de requête -----
 class QueryRequest(BaseModel):
     question: str
 
-# ----- SQL cleaning helpers -----
+# ----- Helpers SQL -----
 def clean_llm_sql(sql: str) -> str:
-    """Strip markdown, whitespace and fix unqualified table names."""
+    """
+    Nettoie le SQL produit par le LLM :
+    - supprime le markdown inutile
+    - remplace les références non qualifiées à artists_union
+    """
     sql = sql.replace("```sql", "").replace("```", "").strip()
 
     # Remplacer toute référence non qualifiée à artists_union
-    # Exemple: FROM artists_union → FROM `music-data-eng.music_dataset.artists_union`
     sql = re.sub(
         r"\bFROM\s+artists_union\b",
         "FROM `music-data-eng.music_dataset.artists_union`",
@@ -35,7 +38,7 @@ def clean_llm_sql(sql: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    # Pareil pour les JOIN éventuels
+    # Idem pour les JOIN éventuels
     sql = re.sub(
         r"\bJOIN\s+artists_union\b",
         "JOIN `music-data-eng.music_dataset.artists_union`",
@@ -45,14 +48,37 @@ def clean_llm_sql(sql: str) -> str:
     
     return sql
 
-def make_genre_case_insensitive(sql: str) -> str:
+
+def make_genre_case_insensitive(sql_query: str) -> str:
     """
-    Converts any pattern like:
-      'Electro' IN UNNEST(spotify_artist_genres)
-    to a case-insensitive EXISTS check that works in BigQuery arrays.
+    Corrige les erreurs fréquentes liées à spotify_artist_genres :
+    1. Si le LLM écrit LOWER(spotify_artist_genres), on remplace
+       par UNNEST + LOWER(genre).
+    2. Si le LLM génère une condition du type:
+         'Electro' IN UNNEST(spotify_artist_genres)
+       on la transforme en EXISTS insensible à la casse.
     """
+
+    # --- Cas 1 : LOWER appliqué directement à un ARRAY ---
+    if re.search(r"LOWER\s*\(\s*spotify_artist_genres\s*\)", sql_query, re.IGNORECASE):
+        # Ajouter UNNEST si absent
+        if "UNNEST(spotify_artist_genres)" not in sql_query.upper():
+            sql_query = re.sub(
+                r"(FROM\s+[^\s]+)",
+                r"\1, UNNEST(spotify_artist_genres) AS genre",
+                sql_query,
+                flags=re.IGNORECASE,
+            )
+        # Remplacer LOWER(spotify_artist_genres) par LOWER(genre)
+        sql_query = re.sub(
+            r"LOWER\s*\(\s*spotify_artist_genres\s*\)",
+            "LOWER(genre)",
+            sql_query,
+            flags=re.IGNORECASE,
+        )
+
+    # --- Cas 2 : '<genre>' IN UNNEST(spotify_artist_genres) ---
     pattern = r"'([^']+)'\s+IN\s+UNNEST\((\w+)\)"
-    
     def repl(match):
         genre = match.group(1)
         column = match.group(2)
@@ -62,19 +88,27 @@ def make_genre_case_insensitive(sql: str) -> str:
             f"WHERE LOWER(g) = LOWER('{genre}')"
             f")"
         )
-    
-    return re.sub(pattern, repl, sql, flags=re.IGNORECASE)
+    sql_query = re.sub(pattern, repl, sql_query, flags=re.IGNORECASE)
+
+    return sql_query
+
 
 # ----- Endpoints -----
 @music_data_api.get("/")
 def read_root():
-    return {"message": "Welcome to our music data api"}
+    return {"message": "Bienvenue sur notre API music data hub"}
 
 @music_data_api.post("/ask")
 def ask_bigquery(req: QueryRequest):
-    """Ask a question -> LLM builds SQL -> Run SQL -> Return result"""
+    """
+    L'utilisateur pose une question → 
+    le LLM génère une requête SQL → 
+    on nettoie et corrige le SQL → 
+    on exécute dans BigQuery → 
+    on retourne le résultat.
+    """
 
-    # Step 1: Ask LLM to propose a SQL query
+    # Étape 1 : construire le prompt pour le LLM
     prompt = f"""
     You are a data assistant. The dataset is `{PROJECT_ID}.{DATASET_ID}`.
     Table:
@@ -95,6 +129,7 @@ def ask_bigquery(req: QueryRequest):
     - Never use just "artists_union".
     - `spotify_artist_genres` is an ARRAY<STRING>, use UNNEST() directly, do NOT use SPLIT().
     - Genre filters must be case-insensitive with LOWER().
+    - Artists in teh response should be unique.
     - Return only valid BigQuery SQL, no markdown, no explanation.    
     Question: {req.question}
     """
@@ -104,21 +139,33 @@ def ask_bigquery(req: QueryRequest):
         messages=[{"role": "user", "content": prompt}]
     )
 
-    # Step 2: Extract SQL and clean it
-    sql_query = llm_resp.choices[0].message.content.strip()
-    sql_query = clean_llm_sql(sql_query)
-    sql_query = make_genre_case_insensitive(sql_query)
+    # Étape 2 : SQL brut du LLM
+    raw_sql = llm_resp.choices[0].message.content.strip()
 
-    # Step 2: Run query in BigQuery
+    # Étape 3 : nettoyage et correction
+    cleaned_sql = clean_llm_sql(raw_sql)
+    fixed_sql = make_genre_case_insensitive(cleaned_sql)
+
+    # 🔎 Logging (console)
+    print("=== SQL BRUT (LLM) ===")
+    print(raw_sql)
+    print("=== SQL NETTOYÉ ===")
+    print(cleaned_sql)
+    print("=== SQL FINAL CORRIGÉ ===")
+    print(fixed_sql)
+
+    # Étape 4 : exécution dans BigQuery
     try:
-        df = bq_client.query(sql_query).to_dataframe()
-        # Convert to JSON-safe Python types
+        df = bq_client.query(fixed_sql).to_dataframe()
+        # Conversion en JSON compatible
         result_preview = json.loads(df.head(10).to_json(orient="records"))
     except Exception as e:
-        return {"error": str(e), "sql": sql_query}
+        return {"error": str(e), "sql": fixed_sql}
 
     return {
         "question": req.question,
-        "sql": sql_query,
+        "sql_raw": raw_sql,
+        "sql_cleaned": cleaned_sql,
+        "sql_final": fixed_sql,
         "results": result_preview
     }

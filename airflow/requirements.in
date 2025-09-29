@@ -8,3 +8,4 @@ google-cloud-storage
 requests
 plotly-express
 dbt-bigquery
+streamlit
