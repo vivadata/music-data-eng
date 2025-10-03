@@ -7,3 +7,5 @@ apache-airflow-providers-postgres
 google-cloud-storage
 requests
 plotly-express
+dbt-bigquery
+streamlit

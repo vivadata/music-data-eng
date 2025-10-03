@@ -5,5 +5,5 @@ sources:
     database: music-data-eng
     schema: music_dataset
     tables:
-      - name: deezer_results
+      - name: deezer_artists
       - name: spotify_artists

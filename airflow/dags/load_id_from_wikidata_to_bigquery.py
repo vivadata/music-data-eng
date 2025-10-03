@@ -6,17 +6,17 @@ import requests
 from loguru import logger
 import io
 
-
 PROJECT_ID = "music-data-eng"
 DATASET_ID = "music_dataset"
 OUTPUT_TABLE = "wikidata_artists"
+CHUNK_SIZE = 5000  # nombre de lignes par batch pour BigQuery
 
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
     "email_on_failure": False,
     "email_on_retry": False,
-    "retries": 0,
+    "retries": 2,
     "retry_delay": timedelta(minutes=5),
 }
 
@@ -28,12 +28,16 @@ default_args = {
     default_args=default_args,                   
     tags=["wikidata", "artists"],
 )
-def process_wikidata_artists_dag():
+def fetch_wikidata_artists_data_dag():
 
     @task
-    def process_wikidata():
-        """Fetch data from Wikidata and return a DataFrame."""
-        logger.info(f"Démarrage du traitement Wikidata")
+    def fetch_wikidata_data() -> pd.DataFrame:
+        """
+        Récupère les données depuis Wikidata et retourne un DataFrame Pandas.
+        """
+        logger.info("Démarrage de la récupération Wikidata")
+        
+        # Requête SPARQL
         query = """
         SELECT 
             ?item 
@@ -50,18 +54,24 @@ def process_wikidata_artists_dag():
             SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
         }
         """
+
         url = "https://query.wikidata.org/sparql"
         headers = {"Accept": "text/csv"}
+
+        # Exécution de la requête
         response = requests.get(url, params={"query": query}, headers=headers)
         response.raise_for_status()
 
+        # Lecture des résultats dans un DataFrame
         df = pd.read_csv(io.StringIO(response.text))
-        logger.info(f"Wikidata query returned {df.shape[0]} rows with {df.shape[1]} columns")
+        logger.info(f"La requête Wikidata a retourné {df.shape[0]} lignes et {df.shape[1]} colonnes")
         return df
-        
+
     @task
-    def load_results_to_bq(df: pd.DataFrame):
-        """Charge les résultats dans BigQuery"""
+    def write_to_bigquery(df: pd.DataFrame):
+        """
+        Charge le DataFrame dans BigQuery par lots pour gérer les gros volumes.
+        """
         if df.empty:
             logger.warning("Aucun résultat à charger")
             return
@@ -69,6 +79,7 @@ def process_wikidata_artists_dag():
         client = bigquery.Client(project=PROJECT_ID)
         table_id = client.dataset(DATASET_ID).table(OUTPUT_TABLE)
 
+        # Configuration du job BigQuery
         job_config = bigquery.LoadJobConfig(
             schema=[
                 bigquery.SchemaField("item", "STRING", mode="REQUIRED"),
@@ -81,12 +92,21 @@ def process_wikidata_artists_dag():
             write_disposition="WRITE_TRUNCATE",
         )
 
-        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
-        job.result()
-        logger.info(f"{len(df)} lignes chargées dans {table_id}")
-  
-    # Pipeline
-    df=process_wikidata()
-    load_results_to_bq(df)
+        # Découpage en chunks
+        total_rows = len(df)
+        logger.info(f"Chargement par chunks de {CHUNK_SIZE} lignes (total {total_rows})")
 
-dag_instance = process_wikidata_artists_dag()
+        for start in range(0, total_rows, CHUNK_SIZE):
+            end = min(start + CHUNK_SIZE, total_rows)
+            chunk_df = df.iloc[start:end]
+            logger.info(f"Chargement du chunk lignes {start} à {end}")
+            job = client.load_table_from_dataframe(chunk_df, table_id, job_config=job_config if start == 0 else None)
+            job.result()
+
+        logger.info(f"Chargement terminé : {total_rows} lignes insérées dans {table_id}")
+  
+    # Définition de la pipeline
+    df = fetch_wikidata_data()
+    write_to_bigquery(df)
+
+dag_instance = fetch_wikidata_artists_data_dag()

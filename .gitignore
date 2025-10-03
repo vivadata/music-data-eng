@@ -18,6 +18,10 @@ dist/
 keys/
 logs/
 
-
 # vscode
 .vscode/
+
+# dbt build artifacts
+dbt/target/
+dbt/dbt_modules/
+dbt/logs/
